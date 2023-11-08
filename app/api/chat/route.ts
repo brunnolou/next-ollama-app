@@ -1,29 +1,50 @@
-import { StreamingTextResponse, Message } from "ai";
-import { AIMessage, HumanMessage } from "langchain/schema";
-import { ChatOllama } from "langchain/chat_models/ollama";
-import { BytesOutputParser } from "langchain/schema/output_parser";
+import {
+  CompletionChunk,
+  OllamaStream,
+  ollamaStream,
+} from "@/app/ollama-stream";
+import { StreamingTextResponse, Message, streamToResponse } from "ai";
+import { NextResponse } from "next/server";
+import { Ollama } from "ollama-node";
+import { PassThrough, Readable } from "stream";
 
-export const runtime = "edge";
+const wait = (ms: number): Promise<void> => {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+};
 
-export async function POST(req: Request) {
-  const { messages } = await req.json();
+// export const runtime = "edge";
+let context: Record<string, number[]> = {};
 
-  const model = new ChatOllama({
-    baseUrl: process.env.OLLAMA_BASE_URL,
-    model: "mistral",
+export async function POST(req: Request, res: Response) {
+  const { messages, id } = (await req.json()) as {
+    messages: Message[];
+    id: string;
+  };
+  console.log("id: ", id);
+
+  const ollama = new Ollama();
+  await ollama.setModel("mistral");
+
+  if (context[id]) ollama.setContext(context[id]);
+
+  const response = ollamaStream(async (addChunk, close) => {
+    await ollama.streamingGenerate(
+      messages[messages.length - 1].content,
+      null,
+      null,
+      (d) => {
+        const data = JSON.parse(d);
+
+        if (data.done) {
+          context[id] = data.context;
+
+          return close();
+        }
+
+        return addChunk(data.response);
+      }
+    );
   });
 
-  const parser = new BytesOutputParser();
-
-  const stream = await model
-    .pipe(parser)
-    .stream(
-      (messages as Message[]).map((m) =>
-        m.role == "user"
-          ? new HumanMessage(m.content)
-          : new AIMessage(m.content)
-      )
-    );
-
-  return new StreamingTextResponse(stream);
+  return new StreamingTextResponse(response);
 }
